@@ -3,11 +3,11 @@ name: Project Sync
 # Auto-adds new issues to the Symphony test board and updates
 # their Status field as the issue moves through its lifecycle.
 #
-# - issues.opened   -> add to project 3, Status=Todo
+# - issues.opened   -> add to project 3 (idempotent), Status=Todo
 # - issues.closed   -> Status=Done
 #
-# Uses GITHUB_TOKEN with explicit permissions; this covers
-# repo-linked Projects v2 without needing a separate PAT.
+# Uses GraphQL mutations directly to avoid `gh project item-edit`
+# version-dependent behavior on the Actions runner.
 
 on:
   issues:
@@ -24,60 +24,96 @@ jobs:
       - name: Sync issue to project board
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PROJECT_NUMBER: "3"
-          PROJECT_OWNER: "Will2612"
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ACTION: ${{ github.event.action }}
+          PROJECT_ID: "PVT_kwHOCLz8xc4BZrIR"
           STATUS_FIELD_ID: "PVTSSF_lAHOCLz8xc4BZrIRzhUoKx0"
           OPTION_TODO: "f75ad846"
           OPTION_DONE: "98236657"
         run: |
           set -euo pipefail
 
-          ISSUE_URL="${{ github.event.issue.html_url }}"
-          ACTION="${{ github.event.action }}"
-
-          # Find existing project item (if any) for this issue.
-          # `gh project item-list` returns items with `.content.url` for
-          # issue/PR items. Filter by URL match.
+          # 1. Resolve the project item for this issue (if it already
+          #    exists in the project). `node_id` is the global id of
+          #    the project item, not the content (issue).
           ITEM_ID="$(
-            gh project item-list "$PROJECT_NUMBER" \
-              --owner "$PROJECT_OWNER" \
-              --format json \
-              --jq ".items[]? | select(.content.url == \"$ISSUE_URL\") | .id" \
+            gh api graphql \
+              -f query='
+                query($projectId: ID!, $contentId: ID!) {
+                  node(id: $projectId) {
+                    ... on ProjectV2 {
+                      itemByContentId(contentId: $contentId) { id }
+                    }
+                  }
+                }
+              ' \
+              -f projectId="$PROJECT_ID" \
+              -f contentId="$ISSUE_NODE_ID" \
+              --jq '.data.node.itemByContentId.id // ""' \
               2>/dev/null || true
           )"
 
-          case "$ACTION" in
-            opened)
-              if [ -z "$ITEM_ID" ]; then
-                echo "::notice::Adding $ISSUE_URL to project $PROJECT_NUMBER"
-                ITEM_ID="$(
-                  gh project item-add "$PROJECT_NUMBER" \
-                    --owner "$PROJECT_OWNER" \
-                    --url "$ISSUE_URL" \
-                    --format json \
-                    --jq '.id'
-                )"
-              else
-                echo "::notice::$ISSUE_URL already in project as $ITEM_ID"
-              fi
-              OPTION_ID="$OPTION_TODO"
-              ;;
-            closed)
-              if [ -z "$ITEM_ID" ]; then
-                echo "Issue $ISSUE_URL is not in project $PROJECT_NUMBER; nothing to update."
-                exit 0
-              fi
-              OPTION_ID="$OPTION_DONE"
-              ;;
-            *)
-              echo "Unhandled action: $ACTION"
+          # 2. On opened: add to project if not present. On closed:
+          #    bail if not present (nothing to update).
+          if [ "$ACTION" = "opened" ]; then
+            if [ -z "$ITEM_ID" ]; then
+              echo "::notice::Adding $ISSUE_URL to project"
+              ADD_RESULT="$(
+                gh api graphql \
+                  -f query='
+                    mutation($projectId: ID!, $contentId: ID!) {
+                      addProjectV2ItemById(
+                        input: { projectId: $projectId, contentId: $contentId }
+                      ) {
+                        item { id }
+                      }
+                    }
+                  ' \
+                  -f projectId="$PROJECT_ID" \
+                  -f contentId="$ISSUE_NODE_ID"
+              )"
+              ITEM_ID="$(
+                echo "$ADD_RESULT" | \
+                  gh api graphql --jq '.data.addProjectV2ItemById.item.id // ""' \
+                  2>/dev/null || \
+                echo "$ADD_RESULT" | sed -n 's/.*"item":[[:space:]]*{"id":"\([^"]*\)".*/\1/p' | head -1
+              )"
+            fi
+            if [ -z "$ITEM_ID" ]; then
+              echo "::error::Failed to obtain project item id"
+              exit 1
+            fi
+            OPTION_ID="$OPTION_TODO"
+          elif [ "$ACTION" = "closed" ]; then
+            if [ -z "$ITEM_ID" ]; then
+              echo "Issue $ISSUE_URL is not in project; nothing to update."
               exit 0
-              ;;
-          esac
+            fi
+            OPTION_ID="$OPTION_DONE"
+          else
+            echo "Unhandled action: $ACTION"
+            exit 0
+          fi
 
+          # 3. Set the Status field.
           echo "::notice::Setting Status to $OPTION_ID on item $ITEM_ID"
-          gh project item-edit \
-            --id "$ITEM_ID" \
-            --project-id "PVT_kwHOCLz8xc4BZrIR" \
-            --field-id "$STATUS_FIELD_ID" \
-            --single-select-option-id "$OPTION_ID"
+          gh api graphql \
+            -f query='
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                updateProjectV2ItemFieldValue(
+                  input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { singleSelectOptionId: $optionId }
+                  }
+                ) {
+                  projectV2Item { id }
+                }
+              }
+            ' \
+            -f projectId="$PROJECT_ID" \
+            -f itemId="$ITEM_ID" \
+            -f fieldId="$STATUS_FIELD_ID" \
+            -f optionId="$OPTION_ID"
