@@ -1,13 +1,19 @@
 name: Project Sync
 
-# Auto-adds new issues to the Symphony test board and updates
-# their Status field as the issue moves through its lifecycle.
+# Keeps the Symphony test board's Status field in sync with
+# issue lifecycle on the linked repo.
 #
-# - issues.opened   -> add to project 3 (idempotent), Status=Todo
+# Auto-add behaviour: the project is configured to auto-add new
+# issues from Will2612/symphony-test-board, so a fresh issue
+# appears in the project at the default Status (Todo) without
+# this workflow needing to call addProjectV2ItemById. The
+# workflow only updates the Status field.
+#
+# - issues.opened   -> ensure Status=Todo (idempotent; usually no-op)
 # - issues.closed   -> Status=Done
 #
 # Uses GraphQL mutations directly to avoid `gh project item-edit`
-# version-dependent behavior on the Actions runner.
+# version-dependent behaviour on the Actions runner.
 
 on:
   issues:
@@ -21,11 +27,10 @@ jobs:
     permissions:
       issues: write
     steps:
-      - name: Sync issue to project board
+      - name: Sync issue Status on the project board
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
-          ISSUE_URL: ${{ github.event.issue.html_url }}
           ACTION: ${{ github.event.action }}
           PROJECT_ID: "PVT_kwHOCLz8xc4BZrIR"
           STATUS_FIELD_ID: "PVTSSF_lAHOCLz8xc4BZrIRzhUoKx0"
@@ -34,9 +39,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Resolve the project item for this issue, if it already
-          # exists. We use the issue's `projectItems` connection and
-          # filter to our project by id.
+          # Resolve the project item id for this issue via the
+          # issue's projectItems connection. Returns empty if
+          # the issue is not in the project (e.g. auto-add has
+          # not yet propagated, or the issue belongs to a
+          # different project).
           ITEM_ID="$(
             gh api graphql \
               -f query='
@@ -57,40 +64,22 @@ jobs:
               2>/dev/null || true
           )"
 
-          # On opened: add to project if not present. On closed:
-          # bail if not present (nothing to update).
-          if [ "$ACTION" = "opened" ]; then
-            if [ -z "$ITEM_ID" ]; then
-              echo "::notice::Adding $ISSUE_URL to project"
-              ITEM_ID="$(
-                gh api graphql \
-                  -f query='
-                    mutation($projectId: ID!, $contentId: ID!) {
-                      addProjectV2ItemById(
-                        input: { projectId: $projectId, contentId: $contentId }
-                      ) {
-                        item { id }
-                      }
-                    }
-                  ' \
-                  -f projectId="$PROJECT_ID" \
-                  -f contentId="$ISSUE_NODE_ID" \
-                  --jq '.data.addProjectV2ItemById.item.id // ""'
-              )"
-            fi
-            if [ -z "$ITEM_ID" ]; then
-              echo "::error::Failed to obtain project item id"
-              exit 1
-            fi
-            OPTION_ID="$OPTION_TODO"
-          elif [ "$ACTION" = "closed" ]; then
-            if [ -z "$ITEM_ID" ]; then
-              echo "Issue $ISSUE_URL is not in project; nothing to update."
+          # Decide the target Status option from the event.
+          case "$ACTION" in
+            opened)  OPTION_ID="$OPTION_TODO"  ;;
+            closed)  OPTION_ID="$OPTION_DONE"  ;;
+            *)
+              echo "Unhandled action: $ACTION"
               exit 0
-            fi
-            OPTION_ID="$OPTION_DONE"
-          else
-            echo "Unhandled action: $ACTION"
+              ;;
+          esac
+
+          # If the issue is not in the project, we cannot set
+          # its Status. Log and exit cleanly. The issue should
+          # have been auto-added by the project; if it wasn't,
+          # the user can drag it in via the project UI.
+          if [ -z "$ITEM_ID" ]; then
+            echo "::notice::$ACTION event for issue not in project yet; skipping Status update (auto-add should have placed it)."
             exit 0
           fi
 
