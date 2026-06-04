@@ -126,7 +126,7 @@ jobs:
           # parse `Closes` for Symphony's contract.
           ISSUE_NUMBER="$(
             printf '%s\n' "$PR_BODY" | \
-              grep -oE '(?i)closes[[:space:]]+#?[0-9]+' | \
+              grep -oiE 'closes[[:space:]]+#?[0-9]+' | \
               head -1 | \
               grep -oE '[0-9]+' || true
           )"
