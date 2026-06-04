@@ -21,3 +21,5 @@ Symphony workflow contract:
 - Each workspace is bootstrapped with `git clone` of this repo.
 - The agent (`opencode acp`) makes the change, runs `pytest`, and
   opens a pull request back to `main`.
+- New issues are auto-added to the [Symphony test board](https://github.com/users/Will2612/projects/3)
+  and their Status field is updated by `.github/workflows/project-sync.yml`.

@@ -1,0 +1,83 @@
+name: Project Sync
+
+# Auto-adds new issues to the Symphony test board and updates
+# their Status field as the issue moves through its lifecycle.
+#
+# - issues.opened   -> add to project 3, Status=Todo
+# - issues.closed   -> Status=Done
+#
+# Uses GITHUB_TOKEN with explicit permissions; this covers
+# repo-linked Projects v2 without needing a separate PAT.
+
+on:
+  issues:
+    types: [opened, closed]
+
+permissions: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Sync issue to project board
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROJECT_NUMBER: "3"
+          PROJECT_OWNER: "Will2612"
+          STATUS_FIELD_ID: "PVTSSF_lAHOCLz8xc4BZrIRzhUoKx0"
+          OPTION_TODO: "f75ad846"
+          OPTION_DONE: "98236657"
+        run: |
+          set -euo pipefail
+
+          ISSUE_URL="${{ github.event.issue.html_url }}"
+          ACTION="${{ github.event.action }}"
+
+          # Find existing project item (if any) for this issue.
+          # `gh project item-list` returns items with `.content.url` for
+          # issue/PR items. Filter by URL match.
+          ITEM_ID="$(
+            gh project item-list "$PROJECT_NUMBER" \
+              --owner "$PROJECT_OWNER" \
+              --format json \
+              --jq ".items[]? | select(.content.url == \"$ISSUE_URL\") | .id" \
+              2>/dev/null || true
+          )"
+
+          case "$ACTION" in
+            opened)
+              if [ -z "$ITEM_ID" ]; then
+                echo "::notice::Adding $ISSUE_URL to project $PROJECT_NUMBER"
+                ITEM_ID="$(
+                  gh project item-add "$PROJECT_NUMBER" \
+                    --owner "$PROJECT_OWNER" \
+                    --url "$ISSUE_URL" \
+                    --format json \
+                    --jq '.id'
+                )"
+              else
+                echo "::notice::$ISSUE_URL already in project as $ITEM_ID"
+              fi
+              OPTION_ID="$OPTION_TODO"
+              ;;
+            closed)
+              if [ -z "$ITEM_ID" ]; then
+                echo "Issue $ISSUE_URL is not in project $PROJECT_NUMBER; nothing to update."
+                exit 0
+              fi
+              OPTION_ID="$OPTION_DONE"
+              ;;
+            *)
+              echo "Unhandled action: $ACTION"
+              exit 0
+              ;;
+          esac
+
+          echo "::notice::Setting Status to $OPTION_ID on item $ITEM_ID"
+          gh project item-edit \
+            --id "$ITEM_ID" \
+            --project-id "PVT_kwHOCLz8xc4BZrIR" \
+            --field-id "$STATUS_FIELD_ID" \
+            --single-select-option-id "$OPTION_ID"
