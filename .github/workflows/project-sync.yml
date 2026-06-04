@@ -147,9 +147,9 @@ jobs:
                   }
                 }
               ' \
-              -f owner="${PR_REPO%/*}" \
-              -f name="${PR_REPO#*/}" \
-              -f number="$ISSUE_NUMBER" \
+              -F owner="${PR_REPO%/*}" \
+              -F name="${PR_REPO#*/}" \
+              -F number="$ISSUE_NUMBER" \
               --jq '.data.repository.issue.id' \
               2>/dev/null || true
           )"
