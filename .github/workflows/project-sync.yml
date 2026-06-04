@@ -40,7 +40,7 @@ jobs:
           ITEM_ID="$(
             gh api graphql \
               -f query='
-                query($contentId: ID!, $projectId: ID!) {
+                query($contentId: ID!) {
                   node(id: $contentId) {
                     ... on Issue {
                       projectItems(first: 20) {
@@ -51,7 +51,6 @@ jobs:
                 }
               ' \
               -f contentId="$ISSUE_NODE_ID" \
-              -f projectId="$PROJECT_ID" \
               --jq '.data.node.projectItems.nodes[]
                     | select(.project.id == "'"$PROJECT_ID"'")
                     | .id' \
