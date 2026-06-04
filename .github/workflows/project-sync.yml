@@ -34,7 +34,7 @@ jobs:
       - name: Sync issue Status on the project board
         if: ${{ github.event_name == 'issues' }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYMPHONY_PROJECT_TOKEN }}
           ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
           ACTION: ${{ github.event.action }}
           LABEL_NAME: ${{ github.event.label.name }}
@@ -111,7 +111,7 @@ jobs:
       - name: Set PR Status to Review on open
         if: ${{ github.event_name == 'pull_request' && github.event.action == 'opened' }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYMPHONY_PROJECT_TOKEN }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_REPO: ${{ github.repository }}
         run: |
