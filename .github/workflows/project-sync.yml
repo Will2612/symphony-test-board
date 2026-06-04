@@ -34,32 +34,36 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1. Resolve the project item for this issue (if it already
-          #    exists in the project). `node_id` is the global id of
-          #    the project item, not the content (issue).
+          # Resolve the project item for this issue, if it already
+          # exists. We use the issue's `projectItems` connection and
+          # filter to our project by id.
           ITEM_ID="$(
             gh api graphql \
               -f query='
-                query($projectId: ID!, $contentId: ID!) {
-                  node(id: $projectId) {
-                    ... on ProjectV2 {
-                      itemByContentId(contentId: $contentId) { id }
+                query($contentId: ID!, $projectId: ID!) {
+                  node(id: $contentId) {
+                    ... on Issue {
+                      projectItems(first: 20) {
+                        nodes { id project { id } }
+                      }
                     }
                   }
                 }
               ' \
-              -f projectId="$PROJECT_ID" \
               -f contentId="$ISSUE_NODE_ID" \
-              --jq '.data.node.itemByContentId.id // ""' \
+              -f projectId="$PROJECT_ID" \
+              --jq '.data.node.projectItems.nodes[]
+                    | select(.project.id == "'"$PROJECT_ID"'")
+                    | .id' \
               2>/dev/null || true
           )"
 
-          # 2. On opened: add to project if not present. On closed:
-          #    bail if not present (nothing to update).
+          # On opened: add to project if not present. On closed:
+          # bail if not present (nothing to update).
           if [ "$ACTION" = "opened" ]; then
             if [ -z "$ITEM_ID" ]; then
               echo "::notice::Adding $ISSUE_URL to project"
-              ADD_RESULT="$(
+              ITEM_ID="$(
                 gh api graphql \
                   -f query='
                     mutation($projectId: ID!, $contentId: ID!) {
@@ -71,13 +75,8 @@ jobs:
                     }
                   ' \
                   -f projectId="$PROJECT_ID" \
-                  -f contentId="$ISSUE_NODE_ID"
-              )"
-              ITEM_ID="$(
-                echo "$ADD_RESULT" | \
-                  gh api graphql --jq '.data.addProjectV2ItemById.item.id // ""' \
-                  2>/dev/null || \
-                echo "$ADD_RESULT" | sed -n 's/.*"item":[[:space:]]*{"id":"\([^"]*\)".*/\1/p' | head -1
+                  -f contentId="$ISSUE_NODE_ID" \
+                  --jq '.data.addProjectV2ItemById.item.id // ""'
               )"
             fi
             if [ -z "$ITEM_ID" ]; then
@@ -96,7 +95,7 @@ jobs:
             exit 0
           fi
 
-          # 3. Set the Status field.
+          # Set the Status field.
           echo "::notice::Setting Status to $OPTION_ID on item $ITEM_ID"
           gh api graphql \
             -f query='
