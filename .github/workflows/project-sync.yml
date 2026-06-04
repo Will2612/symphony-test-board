@@ -1,7 +1,12 @@
 name: Project Sync
 
 # Keeps the Symphony test board's Status field in sync with
-# issue lifecycle on the linked repo.
+# issue lifecycle on the linked repo and the PR lifecycle.
+#
+#   issues.opened             -> Status=Todo (auto-add sets it)
+#   issues.labeled (symphony) -> Status=In Progress
+#   issues.closed             -> Status=Done
+#   pull_request.opened       -> Status=Review (parsed from body)
 #
 # Auto-add behaviour: the project is configured to auto-add new
 # issues from Will2612/symphony-test-board, so a fresh issue
@@ -9,15 +14,14 @@ name: Project Sync
 # this workflow needing to call addProjectV2ItemById. The
 # workflow only updates the Status field.
 #
-# - issues.opened   -> ensure Status=Todo (idempotent; usually no-op)
-# - issues.closed   -> Status=Done
-#
 # Uses GraphQL mutations directly to avoid `gh project item-edit`
 # version-dependent behaviour on the Actions runner.
 
 on:
   issues:
-    types: [opened, closed]
+    types: [opened, closed, labeled]
+  pull_request:
+    types: [opened]
 
 permissions: {}
 
@@ -28,22 +32,26 @@ jobs:
       issues: write
     steps:
       - name: Sync issue Status on the project board
+        if: ${{ github.event_name == 'issues' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
           ACTION: ${{ github.event.action }}
+          LABEL_NAME: ${{ github.event.label.name }}
           PROJECT_ID: "PVT_kwHOCLz8xc4BZrIR"
           STATUS_FIELD_ID: "PVTSSF_lAHOCLz8xc4BZrIRzhUoKx0"
           OPTION_TODO: "f75ad846"
+          OPTION_IN_PROGRESS: "47fc9ee4"
           OPTION_DONE: "98236657"
         run: |
           set -euo pipefail
 
-          # Resolve the project item id for this issue via the
-          # issue's projectItems connection. Returns empty if
-          # the issue is not in the project (e.g. auto-add has
-          # not yet propagated, or the issue belongs to a
-          # different project).
+          # On `labeled`, only react to the `symphony` label.
+          if [ "$ACTION" = "labeled" ] && [ "$LABEL_NAME" != "symphony" ]; then
+            echo "::notice::Ignoring label $LABEL_NAME (only 'symphony' is routed)"
+            exit 0
+          fi
+
           ITEM_ID="$(
             gh api graphql \
               -f query='
@@ -64,26 +72,21 @@ jobs:
               2>/dev/null || true
           )"
 
-          # Decide the target Status option from the event.
           case "$ACTION" in
-            opened)  OPTION_ID="$OPTION_TODO"  ;;
-            closed)  OPTION_ID="$OPTION_DONE"  ;;
+            opened)    OPTION_ID="$OPTION_TODO" ;;
+            labeled)   OPTION_ID="$OPTION_IN_PROGRESS" ;;
+            closed)    OPTION_ID="$OPTION_DONE" ;;
             *)
               echo "Unhandled action: $ACTION"
               exit 0
               ;;
           esac
 
-          # If the issue is not in the project, we cannot set
-          # its Status. Log and exit cleanly. The issue should
-          # have been auto-added by the project; if it wasn't,
-          # the user can drag it in via the project UI.
           if [ -z "$ITEM_ID" ]; then
-            echo "::notice::$ACTION event for issue not in project yet; skipping Status update (auto-add should have placed it)."
+            echo "::notice::$ACTION for issue not in project yet; skipping"
             exit 0
           fi
 
-          # Set the Status field.
           echo "::notice::Setting Status to $OPTION_ID on item $ITEM_ID"
           gh api graphql \
             -f query='
@@ -104,3 +107,99 @@ jobs:
             -f itemId="$ITEM_ID" \
             -f fieldId="$STATUS_FIELD_ID" \
             -f optionId="$OPTION_ID"
+
+      - name: Set PR Status to Review on open
+        if: ${{ github.event_name == 'pull_request' && github.event.action == 'opened' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          PROJECT_ID="PVT_kwHOCLz8xc4BZrIR"
+          STATUS_FIELD_ID="PVTSSF_lAHOCLz8xc4BZrIRzhUoKx0"
+          OPTION_REVIEW="6fd0b485"
+
+          # Extract the first `Closes #N` reference from the PR body.
+          # GitHub also accepts `Fixes #N`, `Resolves #N`. We only
+          # parse `Closes` for Symphony's contract.
+          ISSUE_NUMBER="$(
+            printf '%s\n' "$PR_BODY" | \
+              grep -oE '(?i)closes[[:space:]]+#?[0-9]+' | \
+              head -1 | \
+              grep -oE '[0-9]+' || true
+          )"
+
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "::notice::PR body has no 'Closes #N' reference; skipping"
+            exit 0
+          fi
+
+          echo "::notice::PR closes issue #$ISSUE_NUMBER; setting Status=Review"
+
+          ISSUE_NODE_ID="$(
+            gh api graphql \
+              -f query='
+                query($owner: String!, $name: String!, $number: Int!) {
+                  repository(owner: $owner, name: $name) {
+                    issue(number: $number) { id }
+                  }
+                }
+              ' \
+              -f owner="${PR_REPO%/*}" \
+              -f name="${PR_REPO#*/}" \
+              -f number="$ISSUE_NUMBER" \
+              --jq '.data.repository.issue.id' \
+              2>/dev/null || true
+          )"
+
+          if [ -z "$ISSUE_NODE_ID" ] || [ "$ISSUE_NODE_ID" = "null" ]; then
+            echo "::warning::Could not resolve issue #$ISSUE_NUMBER; skipping"
+            exit 0
+          fi
+
+          ITEM_ID="$(
+            gh api graphql \
+              -f query='
+                query($contentId: ID!) {
+                  node(id: $contentId) {
+                    ... on Issue {
+                      projectItems(first: 20) {
+                        nodes { id project { id } }
+                      }
+                    }
+                  }
+                }
+              ' \
+              -f contentId="$ISSUE_NODE_ID" \
+              --jq '.data.node.projectItems.nodes[]
+                    | select(.project.id == "'"$PROJECT_ID"'")
+                    | .id' \
+              2>/dev/null || true
+          )"
+
+          if [ -z "$ITEM_ID" ]; then
+            echo "::notice::Issue #$ISSUE_NUMBER not in project; skipping"
+            exit 0
+          fi
+
+          gh api graphql \
+            -f query='
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                updateProjectV2ItemFieldValue(
+                  input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { singleSelectOptionId: $optionId }
+                  }
+                ) {
+                  projectV2Item { id }
+                }
+              }
+            ' \
+            -f projectId="$PROJECT_ID" \
+            -f itemId="$ITEM_ID" \
+            -f fieldId="$STATUS_FIELD_ID" \
+            -f optionId="$OPTION_REVIEW"
